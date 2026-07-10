@@ -1,0 +1,10 @@
+.vs/
+bin/
+obj/
+*.log
+*.tmp
+*.user
+*.suo
+
+dist/*
+!dist/NetworkIconSpoofController.exe

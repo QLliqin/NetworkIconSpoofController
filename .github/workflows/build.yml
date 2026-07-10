@@ -1,0 +1,33 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build release executable
+        shell: pwsh
+        run: ./build.ps1 -Clean
+
+      - name: Verify release executable
+        shell: pwsh
+        run: ./verify.ps1
+
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetworkIconSpoofController-win
+          path: dist/NetworkIconSpoofController.exe
+          if-no-files-found: error

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Network Icon Spoof Controller</title>
+  <desc id="desc">A green globe and an amber power control on a charcoal rounded square.</desc>
+
+  <rect x="28" y="28" width="456" height="456" rx="108" fill="#24282d"/>
+
+  <circle cx="238" cy="232" r="142" fill="#18a477"/>
+  <circle cx="238" cy="232" r="142" fill="none" stroke="#f7faf9" stroke-width="24"/>
+  <ellipse cx="238" cy="232" rx="68" ry="142" fill="none" stroke="#f7faf9" stroke-width="22"/>
+  <ellipse cx="238" cy="232" rx="142" ry="64" fill="none" stroke="#f7faf9" stroke-width="22"/>
+  <path d="M96 232h284" fill="none" stroke="#f7faf9" stroke-width="22" stroke-linecap="round"/>
+
+  <circle cx="382" cy="374" r="78" fill="#24282d"/>
+  <circle cx="382" cy="374" r="62" fill="#f4b942"/>
+  <path d="M382 332v48" fill="none" stroke="#24282d" stroke-width="18" stroke-linecap="round"/>
+  <path d="M353 348a42 42 0 1 0 58 0" fill="none" stroke="#24282d" stroke-width="18" stroke-linecap="round"/>
+</svg>
