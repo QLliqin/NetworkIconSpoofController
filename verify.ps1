@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 if ([string]::IsNullOrWhiteSpace($Executable)) {
-    $Executable = Join-Path $PSScriptRoot "dist\NetworkIconSpoofController.exe"
+    $Executable = Join-Path $PSScriptRoot "dist\TimestampConverter.exe"
 }
 $Executable = [IO.Path]::GetFullPath($Executable)
 $iconPath = Join-Path $PSScriptRoot "assets\app-icon.ico"
@@ -21,14 +21,61 @@ if (-not (Test-Path -LiteralPath $iconPath)) {
 }
 
 $assemblyName = [Reflection.AssemblyName]::GetAssemblyName($Executable)
-if ($assemblyName.Version -ne [Version]"1.1.0.0") {
+if ($assemblyName.Version -ne [Version]"3.0.0.0") {
     throw "Unexpected assembly version: $($assemblyName.Version)"
 }
 
 $bytes = [IO.File]::ReadAllBytes($Executable)
+function Assert-Pe64([byte[]]$Image, [string]$Label, [bool]$RequireDll = $false) {
+    if ($Image.Length -lt 64 -or $Image[0] -ne 0x4d -or $Image[1] -ne 0x5a) {
+        throw "$Label is not a valid PE image."
+    }
+    $peOffset = [BitConverter]::ToInt32($Image, 0x3c)
+    if ($peOffset -lt 64 -or $peOffset -gt ($Image.Length - 26) -or
+        [BitConverter]::ToUInt32($Image, $peOffset) -ne 0x4550 -or
+        [BitConverter]::ToUInt16($Image, $peOffset + 4) -ne 0x8664 -or
+        [BitConverter]::ToUInt16($Image, $peOffset + 24) -ne 0x20b) {
+        throw "$Label must be an x64 PE32+ image."
+    }
+    if ($RequireDll -and (([BitConverter]::ToUInt16($Image, $peOffset + 22) -band 0x2000) -eq 0)) {
+        throw "$Label must have the PE DLL characteristic."
+    }
+}
+Assert-Pe64 $bytes "TimestampConverter.exe"
+
+# Reading assembly resources does not run the entry point or static constructors,
+# load the native DLL, or initialize any Explorer/XAML connection. LoadFile also
+# works in PowerShell 7, where ReflectionOnlyLoadFrom is not supported.
+$assembly = [Reflection.Assembly]::LoadFile($Executable)
+$nativeResourceName = "TimestampConverter.Native.dll"
+if ($assembly.GetManifestResourceNames() -notcontains $nativeResourceName) {
+    throw "The embedded native library resource is missing: $nativeResourceName"
+}
+$nativeStream = $assembly.GetManifestResourceStream($nativeResourceName)
+if ($null -eq $nativeStream) {
+    throw "The embedded native library resource could not be read."
+}
+try {
+    $nativeMemory = New-Object IO.MemoryStream
+    try {
+        $nativeStream.CopyTo($nativeMemory)
+        $nativeBytes = $nativeMemory.ToArray()
+    }
+    finally {
+        $nativeMemory.Dispose()
+    }
+}
+finally {
+    $nativeStream.Dispose()
+}
+Assert-Pe64 $nativeBytes $nativeResourceName $true
+
 $ascii = [Text.Encoding]::ASCII.GetString($bytes)
-if (-not $ascii.Contains("requireAdministrator")) {
-    throw "The embedded requireAdministrator manifest was not found."
+if (-not $ascii.Contains('level="asInvoker"') -or $ascii.Contains('level="requireAdministrator"')) {
+    throw "The executable must embed an asInvoker manifest without administrator elevation."
+}
+if (-not $ascii.Contains("dpiAware") -or -not $ascii.Contains("8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a")) {
+    throw "DPI awareness or the Windows 10/11 compatibility declaration is missing."
 }
 
 $stream = [IO.File]::OpenRead($iconPath)
@@ -119,18 +166,46 @@ if ($embeddedIconHash -ne $expectedIconHash) {
     throw "The executable icon does not match assets/app-icon.ico."
 }
 
-$assembly = [Reflection.Assembly]::LoadFile($Executable)
-$systemChanges = $assembly.GetType("SystemChanges", $true)
-$detectedState = $systemChanges.GetMethod("DetectState").Invoke($null, @()).ToString()
-$connectivity = $systemChanges.GetMethod("GetConnectivitySummary").Invoke($null, @()).ToString()
+# Exercise the pure conversion logic. Never launch the GUI or apply a region here;
+# verification also runs on CI hosts without an interactive Explorer taskbar.
+$candidates = @(
+    (Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
+    (Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe")
+)
+$csc = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $csc) {
+    throw ".NET Framework 4.x C# compiler was not found."
+}
+$testDirectory = Join-Path $PSScriptRoot "obj\verification"
+New-Item -ItemType Directory -Path $testDirectory -Force | Out-Null
+$testExecutable = Join-Path $testDirectory "TimestampConverterTests.exe"
+$testArguments = @(
+    "/nologo",
+    "/target:exe",
+    "/optimize+",
+    "/main:TimestampConverterTests",
+    "/out:$testExecutable",
+    (Join-Path $PSScriptRoot "src\TimestampConverter.cs"),
+    (Join-Path $PSScriptRoot "tests\TimestampConverterTests.cs")
+)
+& $csc @testArguments
+if ($LASTEXITCODE -ne 0) {
+    throw "Timestamp conversion test compilation failed with exit code $LASTEXITCODE."
+}
+& $testExecutable
+if ($LASTEXITCODE -ne 0) {
+    throw "Timestamp conversion tests failed with exit code $LASTEXITCODE."
+}
 
 [pscustomobject]@{
     Executable = $Executable
     Version = $assemblyName.Version.ToString()
-    RequiresAdministrator = $true
+    Architecture = "x64"
+    RequiresAdministrator = $false
+    EmbeddedNativeLibrary = $nativeResourceName
+    EmbeddedNativeLibraryIsPe64 = $true
     IconMatchesSource = $true
     IconSizes = ($sizes -join ", ")
-    DetectedState = $detectedState
-    Connectivity = $connectivity
+    ConversionTestsPassed = $true
     SHA256 = (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash
 } | Format-List

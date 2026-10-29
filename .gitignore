@@ -1,10 +1,15 @@
 .vs/
 bin/
 obj/
+TimestampConverter.Native/
 *.log
 *.tmp
 *.user
 *.suo
+*.pdb
+*.ilk
+*.exp
+*.lib
 
 dist/*
-!dist/NetworkIconSpoofController.exe
+!dist/TimestampConverter.exe

@@ -1,920 +1,287 @@
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
+﻿using System;
 using System.Drawing;
 using System.Globalization;
-using System.IO;
-using System.Net;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Security.Principal;
-using System.Text;
 using System.Threading;
 using System.Windows.Forms;
-using Microsoft.Win32;
 
-[assembly: AssemblyTitle("网络图标伪装控制器")]
-[assembly: AssemblyDescription("控制 Windows NCSI 网络图标伪装")]
+[assembly: AssemblyTitle("时间戳转换器")]
+[assembly: AssemblyDescription("Unix 时间戳与地区日期时间转换工具")]
 [assembly: AssemblyCompany("Local Tool")]
-[assembly: AssemblyProduct("网络图标伪装控制器")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
-
-internal enum SpoofState
-{
-    Disabled,
-    Enabled,
-    Partial
-}
-
-internal sealed class RegistryTarget
-{
-    public readonly string SubKey;
-    public readonly string Name;
-    public readonly RegistryValueKind Kind;
-    public readonly object Value;
-
-    public RegistryTarget(string subKey, string name, RegistryValueKind kind, object value)
-    {
-        SubKey = subKey;
-        Name = name;
-        Kind = kind;
-        Value = value;
-    }
-}
-
-internal sealed class RegistryBackup
-{
-    public string SubKey;
-    public string Name;
-    public bool Exists;
-    public RegistryValueKind Kind;
-    public string SerializedValue;
-}
-
-internal sealed class ProcessResult
-{
-    public int ExitCode;
-    public string Output;
-}
-
-internal static class SystemChanges
-{
-    private const string NcsiKey = @"SYSTEM\CurrentControlSet\Services\NlaSvc\Parameters\Internet";
-    private const string PolicyKey = @"SOFTWARE\Policies\Microsoft\Windows\NetworkConnectivityStatusIndicator";
-    private const string HostsBegin = "# WiFiSpoofer BEGIN";
-    private const string HostsEnd = "# WiFiSpoofer END";
-    private const string FirewallPrefix = "WiFiSpoofer_NCSI_Block";
-    private const string MismatchContent = "WiFiSpoofer-Do-Not-Match";
-
-    private static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
-    private static readonly object LogLock = new object();
-    private static readonly string DataDirectory =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NetworkIconSpoofController");
-    private static readonly string BackupFile = Path.Combine(DataDirectory, "registry-backup.txt");
-    private static readonly string LogFile = Path.Combine(DataDirectory, "controller.log");
-    private static readonly string HostsFile =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"drivers\etc\hosts");
-
-    private static readonly RegistryTarget[] SpoofTargets =
-    {
-        new RegistryTarget(NcsiKey, "EnableActiveProbing", RegistryValueKind.DWord, 1),
-        new RegistryTarget(NcsiKey, "NoActiveProbe", RegistryValueKind.DWord, 0),
-        new RegistryTarget(NcsiKey, "ActiveWebProbeHost", RegistryValueKind.String, "localhost"),
-        new RegistryTarget(NcsiKey, "ActiveWebProbePath", RegistryValueKind.String, "wifi-spoofer-connecttest.txt"),
-        new RegistryTarget(NcsiKey, "ActiveWebProbeContent", RegistryValueKind.String, MismatchContent),
-        new RegistryTarget(NcsiKey, "ActiveWebProbeHostV6", RegistryValueKind.String, "localhost"),
-        new RegistryTarget(NcsiKey, "ActiveWebProbePathV6", RegistryValueKind.String, "wifi-spoofer-connecttest.txt"),
-        new RegistryTarget(NcsiKey, "ActiveWebProbeContentV6", RegistryValueKind.String, MismatchContent),
-        new RegistryTarget(NcsiKey, "ActiveDnsProbeHost", RegistryValueKind.String, "localhost"),
-        new RegistryTarget(NcsiKey, "ActiveDnsProbeContent", RegistryValueKind.String, "203.0.113.254"),
-        new RegistryTarget(NcsiKey, "ActiveDnsProbeHostV6", RegistryValueKind.String, "localhost"),
-        new RegistryTarget(NcsiKey, "ActiveDnsProbeContentV6", RegistryValueKind.String, "2001:db8::ffff"),
-        new RegistryTarget(NcsiKey, "WebTimeout", RegistryValueKind.DWord, 3),
-        new RegistryTarget(NcsiKey, "StaleThreshold", RegistryValueKind.DWord, 1),
-        new RegistryTarget(NcsiKey, "PassivePollPeriod", RegistryValueKind.DWord, 1),
-        new RegistryTarget(NcsiKey, "MinimumInternetHopCount", RegistryValueKind.DWord, 255),
-        new RegistryTarget(PolicyKey, "NoActiveProbe", RegistryValueKind.DWord, 0),
-        new RegistryTarget(PolicyKey, "DisablePassivePolling", RegistryValueKind.DWord, 1)
-    };
-
-    // These values match this machine before ForceNoInternetIcon was applied.
-    private static readonly RegistryTarget[] KnownCleanTargets =
-    {
-        new RegistryTarget(NcsiKey, "EnableActiveProbing", RegistryValueKind.DWord, 1),
-        new RegistryTarget(NcsiKey, "NoActiveProbe", RegistryValueKind.DWord, null),
-        new RegistryTarget(NcsiKey, "ActiveWebProbeHost", RegistryValueKind.String, "www.msftconnecttest.com"),
-        new RegistryTarget(NcsiKey, "ActiveWebProbePath", RegistryValueKind.String, "connecttest.txt"),
-        new RegistryTarget(NcsiKey, "ActiveWebProbeContent", RegistryValueKind.String, "Microsoft Connect Test"),
-        new RegistryTarget(NcsiKey, "ActiveWebProbeHostV6", RegistryValueKind.String, "ipv6.msftconnecttest.com"),
-        new RegistryTarget(NcsiKey, "ActiveWebProbePathV6", RegistryValueKind.String, "connecttest.txt"),
-        new RegistryTarget(NcsiKey, "ActiveWebProbeContentV6", RegistryValueKind.String, "Microsoft Connect Test"),
-        new RegistryTarget(NcsiKey, "ActiveDnsProbeHost", RegistryValueKind.String, "dns.msftncsi.com"),
-        new RegistryTarget(NcsiKey, "ActiveDnsProbeContent", RegistryValueKind.String, "131.107.255.255"),
-        new RegistryTarget(NcsiKey, "ActiveDnsProbeHostV6", RegistryValueKind.String, "dns.msftncsi.com"),
-        new RegistryTarget(NcsiKey, "ActiveDnsProbeContentV6", RegistryValueKind.String, "fd3e:4f5a:5b81::1"),
-        new RegistryTarget(NcsiKey, "WebTimeout", RegistryValueKind.DWord, 35),
-        new RegistryTarget(NcsiKey, "StaleThreshold", RegistryValueKind.DWord, 30),
-        new RegistryTarget(NcsiKey, "PassivePollPeriod", RegistryValueKind.DWord, 15),
-        new RegistryTarget(NcsiKey, "MinimumInternetHopCount", RegistryValueKind.DWord, null),
-        new RegistryTarget(PolicyKey, "NoActiveProbe", RegistryValueKind.DWord, null),
-        new RegistryTarget(PolicyKey, "DisablePassivePolling", RegistryValueKind.DWord, null)
-    };
-
-    public static string LogPath
-    {
-        get { return LogFile; }
-    }
-
-    public static void EnableSpoof()
-    {
-        AppendLog("ENABLE started");
-        EnsureBackupBeforeEnable();
-
-        // Resolve the real probe addresses before the hosts block is installed.
-        RemoveHostsBlock();
-        List<string> probeAddresses = ResolveProbeAddresses();
-
-        foreach (RegistryTarget target in SpoofTargets)
-        {
-            WriteRegistryTarget(target);
-        }
-
-        RemoveFirewallRules();
-        InstallFirewallRules(probeAddresses);
-        EnsureHostsBlock();
-        RefreshNetworkState();
-        AppendLog("ENABLE completed");
-    }
-
-    public static void DisableSpoof()
-    {
-        AppendLog("DISABLE started");
-        RestoreBackupOrKnownCleanValues();
-        RemoveFirewallRules();
-        RemoveHostsBlock();
-        RefreshNetworkState();
-        AppendLog("DISABLE completed");
-    }
-
-    public static void RefreshNetworkState()
-    {
-        RunProcess("ipconfig.exe", "/flushdns", 15000);
-        RunProcess("netsh.exe", "interface ip delete arpcache", 15000);
-
-        string script =
-            "Restart-Service NlaSvc -Force -ErrorAction SilentlyContinue; " +
-            "Restart-Service netprofm -Force -ErrorAction SilentlyContinue; " +
-            "Start-Service NlaSvc -ErrorAction SilentlyContinue; " +
-            "Start-Service netprofm -ErrorAction SilentlyContinue";
-        RunPowerShell(script, 45000);
-
-        IntPtr ignored;
-        NativeMethods.SendMessageTimeout(
-            new IntPtr(0xffff),
-            0x001A,
-            IntPtr.Zero,
-            @"SYSTEM\CurrentControlSet\Services\NlaSvc\Parameters\Internet",
-            0x0002,
-            5000,
-            out ignored);
-    }
-
-    public static SpoofState DetectState()
-    {
-        int matches = 0;
-        int expected = 6;
-
-        if (RegistryStringEquals(NcsiKey, "ActiveWebProbeHost", "localhost")) matches++;
-        if (RegistryStringEquals(NcsiKey, "ActiveWebProbeContent", MismatchContent)) matches++;
-        if (RegistryStringEquals(NcsiKey, "ActiveDnsProbeHost", "localhost")) matches++;
-        if (RegistryDwordEquals(NcsiKey, "MinimumInternetHopCount", 255)) matches++;
-        if (RegistryDwordEquals(PolicyKey, "DisablePassivePolling", 1)) matches++;
-        if (HostsBlockExists()) matches++;
-
-        if (matches == expected)
-        {
-            return SpoofState.Enabled;
-        }
-
-        if (matches == 0)
-        {
-            return SpoofState.Disabled;
-        }
-
-        return SpoofState.Partial;
-    }
-
-    public static string GetConnectivitySummary()
-    {
-        string script =
-            "$items = Get-NetConnectionProfile -ErrorAction SilentlyContinue; " +
-            "if (-not $items) { '未检测到活动网络配置' } else { " +
-            "$items | ForEach-Object { $_.InterfaceAlias + ': IPv4=' + $_.IPv4Connectivity + ', IPv6=' + $_.IPv6Connectivity } }";
-        ProcessResult result = RunPowerShell(script, 20000);
-        string value = (result.Output ?? string.Empty).Trim();
-        int cliXml = value.IndexOf("#< CLIXML", StringComparison.Ordinal);
-        if (cliXml >= 0)
-        {
-            value = value.Substring(0, cliXml).Trim();
-        }
-        if (value.Length == 0)
-        {
-            return "Windows 网络判断：读取失败";
-        }
-
-        value = value.Replace("\r\n", "；").Replace("\n", "；");
-        return "Windows 网络判断：" + value;
-    }
-
-    private static void EnsureBackupBeforeEnable()
-    {
-        Directory.CreateDirectory(DataDirectory);
-        if (File.Exists(BackupFile))
-        {
-            return;
-        }
-
-        var lines = new List<string>();
-        if (HasToolFingerprint())
-        {
-            // A legacy one-shot tool was already active, so its spoof values are not a valid backup.
-            lines.Add("MODE|KNOWN_CLEAN");
-        }
-        else
-        {
-            lines.Add("MODE|REGISTRY");
-            foreach (RegistryTarget target in SpoofTargets)
-            {
-                lines.Add(SerializeBackup(ReadRegistryBackup(target.SubKey, target.Name)));
-            }
-        }
-
-        File.WriteAllLines(BackupFile, lines.ToArray(), Utf8NoBom);
-        AppendLog("Backup created: " + lines[0]);
-    }
-
-    private static void RestoreBackupOrKnownCleanValues()
-    {
-        bool restoredRegistryBackup = false;
-
-        if (File.Exists(BackupFile))
-        {
-            string[] lines = File.ReadAllLines(BackupFile, Utf8NoBom);
-            if (lines.Length > 0 && lines[0].Equals("MODE|REGISTRY", StringComparison.Ordinal))
-            {
-                foreach (string line in lines)
-                {
-                    RegistryBackup backup;
-                    if (TryParseBackup(line, out backup))
-                    {
-                        RestoreRegistryBackup(backup);
-                    }
-                }
-                restoredRegistryBackup = true;
-            }
-        }
-
-        if (!restoredRegistryBackup)
-        {
-            foreach (RegistryTarget target in KnownCleanTargets)
-            {
-                WriteRegistryTarget(target);
-            }
-        }
-
-        try
-        {
-            if (File.Exists(BackupFile))
-            {
-                File.Delete(BackupFile);
-            }
-        }
-        catch (Exception ex)
-        {
-            AppendLog("Backup cleanup failed: " + ex.Message);
-        }
-    }
-
-    private static bool HasToolFingerprint()
-    {
-        return HostsBlockExists()
-            || RegistryStringEquals(NcsiKey, "ActiveWebProbeHost", "localhost")
-            || RegistryStringEquals(NcsiKey, "ActiveWebProbeContent", MismatchContent)
-            || RegistryDwordEquals(PolicyKey, "DisablePassivePolling", 1);
-    }
-
-    private static RegistryBackup ReadRegistryBackup(string subKey, string name)
-    {
-        var backup = new RegistryBackup
-        {
-            SubKey = subKey,
-            Name = name,
-            Exists = false,
-            Kind = RegistryValueKind.String,
-            SerializedValue = string.Empty
-        };
-
-        using (RegistryKey key = Registry.LocalMachine.OpenSubKey(subKey, false))
-        {
-            if (key == null)
-            {
-                return backup;
-            }
-
-            object value = key.GetValue(name, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
-            if (value == null)
-            {
-                return backup;
-            }
-
-            backup.Exists = true;
-            backup.Kind = key.GetValueKind(name);
-            backup.SerializedValue = SerializeRegistryValue(value, backup.Kind);
-        }
-
-        return backup;
-    }
-
-    private static string SerializeBackup(RegistryBackup backup)
-    {
-        return "REG|"
-            + Encode(backup.SubKey) + "|"
-            + Encode(backup.Name) + "|"
-            + backup.Exists.ToString(CultureInfo.InvariantCulture) + "|"
-            + backup.Kind.ToString() + "|"
-            + Encode(backup.SerializedValue ?? string.Empty);
-    }
-
-    private static bool TryParseBackup(string line, out RegistryBackup backup)
-    {
-        backup = null;
-        string[] parts = line.Split('|');
-        if (parts.Length != 6 || !parts[0].Equals("REG", StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        RegistryValueKind kind;
-        if (!Enum.TryParse(parts[4], out kind))
-        {
-            return false;
-        }
-
-        bool exists;
-        if (!bool.TryParse(parts[3], out exists))
-        {
-            return false;
-        }
-
-        backup = new RegistryBackup
-        {
-            SubKey = Decode(parts[1]),
-            Name = Decode(parts[2]),
-            Exists = exists,
-            Kind = kind,
-            SerializedValue = Decode(parts[5])
-        };
-        return true;
-    }
-
-    private static string SerializeRegistryValue(object value, RegistryValueKind kind)
-    {
-        if (kind == RegistryValueKind.MultiString)
-        {
-            string[] values = value as string[];
-            return values == null ? string.Empty : string.Join("\u001f", values);
-        }
-        if (kind == RegistryValueKind.Binary)
-        {
-            byte[] values = value as byte[];
-            return values == null ? string.Empty : Convert.ToBase64String(values);
-        }
-        return Convert.ToString(value, CultureInfo.InvariantCulture);
-    }
-
-    private static object DeserializeRegistryValue(string value, RegistryValueKind kind)
-    {
-        switch (kind)
-        {
-            case RegistryValueKind.DWord:
-                return int.Parse(value, CultureInfo.InvariantCulture);
-            case RegistryValueKind.QWord:
-                return long.Parse(value, CultureInfo.InvariantCulture);
-            case RegistryValueKind.MultiString:
-                return value.Split(new[] { '\u001f' }, StringSplitOptions.None);
-            case RegistryValueKind.Binary:
-                return Convert.FromBase64String(value);
-            default:
-                return value;
-        }
-    }
-
-    private static void RestoreRegistryBackup(RegistryBackup backup)
-    {
-        using (RegistryKey key = Registry.LocalMachine.OpenSubKey(backup.SubKey, true)
-               ?? Registry.LocalMachine.CreateSubKey(backup.SubKey))
-        {
-            if (backup.Exists)
-            {
-                key.SetValue(
-                    backup.Name,
-                    DeserializeRegistryValue(backup.SerializedValue, backup.Kind),
-                    backup.Kind);
-            }
-            else
-            {
-                key.DeleteValue(backup.Name, false);
-            }
-        }
-    }
-
-    private static void WriteRegistryTarget(RegistryTarget target)
-    {
-        using (RegistryKey key = Registry.LocalMachine.OpenSubKey(target.SubKey, true)
-               ?? Registry.LocalMachine.CreateSubKey(target.SubKey))
-        {
-            if (target.Value == null)
-            {
-                key.DeleteValue(target.Name, false);
-            }
-            else
-            {
-                key.SetValue(target.Name, target.Value, target.Kind);
-            }
-        }
-    }
-
-    private static bool RegistryStringEquals(string subKey, string name, string expected)
-    {
-        try
-        {
-            using (RegistryKey key = Registry.LocalMachine.OpenSubKey(subKey, false))
-            {
-                object value = key == null ? null : key.GetValue(name, null);
-                return value != null
-                    && string.Equals(Convert.ToString(value, CultureInfo.InvariantCulture), expected, StringComparison.OrdinalIgnoreCase);
-            }
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static bool RegistryDwordEquals(string subKey, string name, int expected)
-    {
-        try
-        {
-            using (RegistryKey key = Registry.LocalMachine.OpenSubKey(subKey, false))
-            {
-                object value = key == null ? null : key.GetValue(name, null);
-                return value != null && Convert.ToInt32(value, CultureInfo.InvariantCulture) == expected;
-            }
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static List<string> ResolveProbeAddresses()
-    {
-        var addresses = new List<string>();
-        string[] hosts =
-        {
-            "www.msftconnecttest.com",
-            "ipv6.msftconnecttest.com",
-            "www.msftncsi.com",
-            "ipv6.msftncsi.com"
-        };
-
-        foreach (string host in hosts)
-        {
-            try
-            {
-                foreach (IPAddress address in Dns.GetHostAddresses(host))
-                {
-                    if (IPAddress.IsLoopback(address))
-                    {
-                        continue;
-                    }
-
-                    string value = address.ToString();
-                    if (!addresses.Contains(value))
-                    {
-                        addresses.Add(value);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                AppendLog("DNS lookup failed for " + host + ": " + ex.Message);
-            }
-        }
-
-        AppendLog("Resolved probe addresses: " + addresses.Count.ToString(CultureInfo.InvariantCulture));
-        return addresses;
-    }
-
-    private static void InstallFirewallRules(IEnumerable<string> addresses)
-    {
-        int index = 0;
-        foreach (string address in addresses)
-        {
-            string ruleName = FirewallPrefix + "_" + index.ToString(CultureInfo.InvariantCulture);
-            string args =
-                "advfirewall firewall add rule name=\"" + ruleName +
-                "\" dir=out action=block enable=yes profile=any protocol=TCP remoteport=80 remoteip=" + address;
-            ProcessResult result = RunProcess("netsh.exe", args, 15000);
-            if (result.ExitCode != 0)
-            {
-                AppendLog("Firewall rule failed: " + ruleName + " " + result.Output);
-            }
-            index++;
-        }
-    }
-
-    private static void RemoveFirewallRules()
-    {
-        string script =
-            "Get-NetFirewallRule -ErrorAction SilentlyContinue | " +
-            "Where-Object { $_.DisplayName -like 'WiFiSpoofer_NCSI_Block*' -or " +
-            "$_.DisplayName -like 'NetworkIconSpoof_NCSI_Block*' } | Remove-NetFirewallRule -ErrorAction SilentlyContinue";
-        RunPowerShell(script, 30000);
-    }
-
-    private static void EnsureHostsBlock()
-    {
-        RemoveHostsBlock();
-        var lines = new List<string>();
-        if (File.Exists(HostsFile))
-        {
-            lines.AddRange(File.ReadAllLines(HostsFile));
-        }
-
-        if (lines.Count > 0 && lines[lines.Count - 1].Length != 0)
-        {
-            lines.Add(string.Empty);
-        }
-
-        lines.Add(HostsBegin);
-        lines.Add("127.0.0.1 www.msftconnecttest.com");
-        lines.Add("127.0.0.1 ipv6.msftconnecttest.com");
-        lines.Add("127.0.0.1 www.msftncsi.com");
-        lines.Add("127.0.0.1 ipv6.msftncsi.com");
-        lines.Add("127.0.0.1 dns.msftncsi.com");
-        lines.Add("::1 www.msftconnecttest.com");
-        lines.Add("::1 ipv6.msftconnecttest.com");
-        lines.Add("::1 www.msftncsi.com");
-        lines.Add("::1 ipv6.msftncsi.com");
-        lines.Add("::1 dns.msftncsi.com");
-        lines.Add(HostsEnd);
-        File.WriteAllLines(HostsFile, lines.ToArray(), Utf8NoBom);
-    }
-
-    private static void RemoveHostsBlock()
-    {
-        if (!File.Exists(HostsFile))
-        {
-            return;
-        }
-
-        string[] lines = File.ReadAllLines(HostsFile);
-        var kept = new List<string>();
-        bool inside = false;
-        foreach (string line in lines)
-        {
-            if (line.Trim().Equals(HostsBegin, StringComparison.OrdinalIgnoreCase))
-            {
-                inside = true;
-                continue;
-            }
-            if (line.Trim().Equals(HostsEnd, StringComparison.OrdinalIgnoreCase))
-            {
-                inside = false;
-                continue;
-            }
-            if (!inside)
-            {
-                kept.Add(line);
-            }
-        }
-
-        while (kept.Count > 0 && kept[kept.Count - 1].Length == 0)
-        {
-            kept.RemoveAt(kept.Count - 1);
-        }
-        File.WriteAllLines(HostsFile, kept.ToArray(), Utf8NoBom);
-    }
-
-    private static bool HostsBlockExists()
-    {
-        try
-        {
-            if (!File.Exists(HostsFile))
-            {
-                return false;
-            }
-            foreach (string line in File.ReadLines(HostsFile))
-            {
-                if (line.Trim().Equals(HostsBegin, StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-            }
-        }
-        catch
-        {
-        }
-        return false;
-    }
-
-    private static ProcessResult RunPowerShell(string script, int timeoutMs)
-    {
-        string quietScript = "$ProgressPreference='SilentlyContinue'; " + script;
-        string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(quietScript));
-        return RunProcess(
-            "powershell.exe",
-            "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + encoded,
-            timeoutMs);
-    }
-
-    private static ProcessResult RunProcess(string fileName, string arguments, int timeoutMs)
-    {
-        try
-        {
-            var startInfo = new ProcessStartInfo(fileName, arguments)
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-
-            using (Process process = Process.Start(startInfo))
-            {
-                if (process == null)
-                {
-                    return new ProcessResult { ExitCode = -1, Output = "Process.Start returned null" };
-                }
-
-                string output = process.StandardOutput.ReadToEnd();
-                string error = process.StandardError.ReadToEnd();
-                if (!process.WaitForExit(timeoutMs))
-                {
-                    try { process.Kill(); } catch { }
-                    return new ProcessResult { ExitCode = -2, Output = output + error + " [timeout]" };
-                }
-
-                return new ProcessResult
-                {
-                    ExitCode = process.ExitCode,
-                    Output = (output + error).Trim()
-                };
-            }
-        }
-        catch (Exception ex)
-        {
-            AppendLog(fileName + " failed: " + ex);
-            return new ProcessResult { ExitCode = -1, Output = ex.Message };
-        }
-    }
-
-    private static string Encode(string value)
-    {
-        return Convert.ToBase64String(Encoding.UTF8.GetBytes(value ?? string.Empty));
-    }
-
-    private static string Decode(string value)
-    {
-        return Encoding.UTF8.GetString(Convert.FromBase64String(value));
-    }
-
-    private static void AppendLog(string message)
-    {
-        try
-        {
-            lock (LogLock)
-            {
-                Directory.CreateDirectory(DataDirectory);
-                File.AppendAllText(
-                    LogFile,
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + " " + message + Environment.NewLine,
-                    Utf8NoBom);
-            }
-        }
-        catch
-        {
-        }
-    }
-}
+[assembly: AssemblyProduct("时间戳转换器")]
+[assembly: AssemblyVersion("3.0.0.0")]
+[assembly: AssemblyFileVersion("3.0.0.0")]
 
 internal sealed class ControllerForm : Form
 {
-    private readonly Label stateLabel;
-    private readonly Label detailLabel;
-    private readonly Label networkLabel;
-    private readonly Label operationLabel;
-    private readonly Panel stateIndicator;
-    private readonly Button enableButton;
-    private readonly Button disableButton;
-    private readonly Button refreshButton;
-    private readonly Button hideButton;
+    private static readonly Color Ink = Color.FromArgb(24, 44, 70);
+    private static readonly Color Muted = Color.FromArgb(100, 115, 132);
+    private static readonly Color Accent = Color.FromArgb(30, 94, 184);
+    private readonly NativeNetworkIconController nativeIcon = new NativeNetworkIconController();
     private readonly NotifyIcon trayIcon;
     private readonly Icon appIcon;
-    private bool allowExit;
-    private bool busy;
-    private bool balloonShown;
+    private readonly Button[] regionButtons = new Button[4];
+    private readonly ToolStripMenuItem[] regionMenuItems = new ToolStripMenuItem[4];
+    private readonly ComboBox unitBox;
+    private readonly TextBox timestampInput, dateInput, dateOutput, timestampOutput;
+    private readonly Label zoneLabel, statusLabel;
+    private readonly System.Windows.Forms.Timer healthTimer;
+    private ConversionRegion region = ConversionRegion.Default;
+    private bool allowExit, applying, balloonShown, initializing = true;
+    private bool nativeOwnsStatus, statusIsError;
 
     public ControllerForm()
     {
-        Text = "网络图标伪装控制器";
-        ClientSize = new Size(560, 388);
-        MinimumSize = new Size(576, 427);
-        MaximumSize = new Size(576, 427);
-        StartPosition = FormStartPosition.CenterScreen;
+        Text = "时间戳转换器";
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96, 96);
+        ClientSize = new Size(680, 590);
+        FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        BackColor = Color.FromArgb(247, 248, 250);
-        Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
-
-        appIcon = LoadApplicationIcon();
+        StartPosition = FormStartPosition.CenterScreen;
+        BackColor = Color.FromArgb(243, 246, 250);
+        ForeColor = Ink;
+        Font = new Font("Microsoft YaHei UI", 9F);
+        appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? (Icon)SystemIcons.Application.Clone();
         Icon = appIcon;
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24, 18, 24, 18), ColumnCount = 1, RowCount = 6 };
+        foreach (int height in new[] { 62, 100, 142, 142, 58, 30 }) layout.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
+        Controls.Add(layout);
+        var header = new Panel { Dock = DockStyle.Fill };
+        header.Controls.Add(new Label { Text = "时间戳转换器", Font = new Font(Font.FontFamily, 20F, FontStyle.Bold), AutoSize = true, Location = new Point(0, 0), ForeColor = Ink });
+        header.Controls.Add(new Label { Text = "UNIX TIME  /  精确到每一毫秒", AutoSize = true, Location = new Point(2, 39), ForeColor = Muted });
+        layout.Controls.Add(header, 0, 0);
 
-        var header = new Panel
+        var regionPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = new Padding(0, 0, 0, 10) };
+        regionPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+        regionPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        regionPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        regionPanel.Controls.Add(new Label { Text = "地区 / 时区", AutoSize = true, ForeColor = Muted }, 0, 0);
+        var regionRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Margin = Padding.Empty };
+        for (int i = 0; i < 4; i++)
         {
-            Location = new Point(0, 0),
-            Size = new Size(560, 72),
-            BackColor = Color.FromArgb(42, 45, 49)
-        };
-        Controls.Add(header);
+            int index = i;
+            regionRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+            var button = MakeButton(TimestampConverter.GetRegionName((ConversionRegion)i), false);
+            button.Margin = new Padding(i == 0 ? 0 : 4, 0, i == 3 ? 0 : 4, 0);
+            button.Click += delegate { SelectRegion((ConversionRegion)index); };
+            regionButtons[i] = button;
+            regionRow.Controls.Add(button, i, 0);
+        }
+        regionPanel.Controls.Add(regionRow, 0, 1);
+        zoneLabel = new Label { Dock = DockStyle.Fill, ForeColor = Muted, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
+        regionPanel.Controls.Add(zoneLabel, 0, 2);
+        layout.Controls.Add(regionPanel, 0, 1);
 
-        var titleLabel = new Label
-        {
-            AutoSize = true,
-            Location = new Point(28, 15),
-            Text = "网络图标伪装控制器",
-            ForeColor = Color.White,
-            Font = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold, GraphicsUnit.Point)
-        };
-        header.Controls.Add(titleLabel);
-
-        var subtitleLabel = new Label
-        {
-            AutoSize = true,
-            Location = new Point(30, 45),
-            Text = "控制 Windows 的“无 Internet”地球图标判断",
-            ForeColor = Color.FromArgb(205, 210, 215)
-        };
-        header.Controls.Add(subtitleLabel);
-
-        stateIndicator = new Panel
-        {
-            Location = new Point(30, 99),
-            Size = new Size(16, 16),
-            BackColor = Color.Gray
-        };
-        Controls.Add(stateIndicator);
-
-        stateLabel = new Label
-        {
-            AutoSize = false,
-            Location = new Point(58, 88),
-            Size = new Size(470, 34),
-            Text = "正在读取当前状态...",
-            ForeColor = Color.FromArgb(35, 38, 42),
-            Font = new Font("Microsoft YaHei UI", 14F, FontStyle.Bold, GraphicsUnit.Point)
-        };
-        Controls.Add(stateLabel);
-
-        detailLabel = new Label
-        {
-            AutoSize = false,
-            Location = new Point(58, 123),
-            Size = new Size(470, 24),
-            Text = string.Empty,
-            ForeColor = Color.FromArgb(90, 96, 102)
-        };
-        Controls.Add(detailLabel);
-
-        networkLabel = new Label
-        {
-            AutoSize = false,
-            Location = new Point(30, 158),
-            Size = new Size(500, 42),
-            Text = "Windows 网络判断：正在读取...",
-            ForeColor = Color.FromArgb(70, 75, 80)
-        };
-        Controls.Add(networkLabel);
-
-        var separator = new Panel
-        {
-            Location = new Point(30, 207),
-            Size = new Size(500, 1),
-            BackColor = Color.FromArgb(218, 221, 225)
-        };
-        Controls.Add(separator);
-
-        enableButton = CreateActionButton(
-            "开启伪装",
-            new Point(30, 229),
-            Color.FromArgb(23, 122, 82),
-            Color.White);
-        enableButton.Click += delegate { RunEnable(); };
-        Controls.Add(enableButton);
-
-        disableButton = CreateActionButton(
-            "关闭伪装",
-            new Point(205, 229),
-            Color.FromArgb(177, 58, 58),
-            Color.White);
-        disableButton.Click += delegate { RunDisable(false); };
-        Controls.Add(disableButton);
-
-        refreshButton = CreateActionButton(
-            "刷新状态",
-            new Point(380, 229),
-            Color.FromArgb(225, 228, 232),
-            Color.FromArgb(35, 38, 42));
-        refreshButton.Click += delegate { RefreshStatus(); };
-        Controls.Add(refreshButton);
-
-        operationLabel = new Label
-        {
-            AutoSize = false,
-            Location = new Point(30, 294),
-            Size = new Size(335, 48),
-            Text = "关闭窗口时程序会隐藏到托盘；伪装状态只由上方按钮改变。",
-            ForeColor = Color.FromArgb(90, 96, 102)
-        };
-        Controls.Add(operationLabel);
-
-        hideButton = new Button
-        {
-            Location = new Point(380, 294),
-            Size = new Size(150, 38),
-            Text = "隐藏到托盘",
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.White,
-            ForeColor = Color.FromArgb(45, 49, 54),
-            Cursor = Cursors.Hand
-        };
-        hideButton.FlatAppearance.BorderColor = Color.FromArgb(190, 195, 201);
+        unitBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, AccessibleName = "时间戳单位" };
+        unitBox.Items.AddRange(new object[] { "秒 (s)", "毫秒 (ms)" });
+        unitBox.SelectedIndex = 0;
+        timestampInput = MakeTextBox(false, "输入 Unix 时间戳");
+        dateOutput = MakeTextBox(true, "日期时间结果");
+        dateInput = MakeTextBox(false, "输入日期时间");
+        timestampOutput = MakeTextBox(true, "时间戳结果");
+        layout.Controls.Add(MakeConversionCard("时间戳 → 日期时间", timestampInput, dateOutput, unitBox, delegate { ConvertTimestamp(); }), 0, 2);
+        var nowButton = MakeButton("当前时间", false);
+        nowButton.Click += delegate { FillCurrentTime(); SetStatus("已填入当前时间。", false); };
+        layout.Controls.Add(MakeConversionCard("日期时间 → 时间戳", dateInput, timestampOutput, nowButton, delegate { ConvertDate(); }), 0, 3);
+        statusLabel = new Label { Dock = DockStyle.Fill, ForeColor = Muted, Padding = new Padding(0, 6, 0, 0), Text = "日期格式：yyyy-MM-dd HH:mm:ss（可加 .fff 毫秒）" };
+        layout.Controls.Add(statusLabel, 0, 4);
+        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Margin = Padding.Empty };
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 116));
+        footer.Controls.Add(new Label { Dock = DockStyle.Fill, Text = "UNIX TIME   ·   v3.0", ForeColor = Muted, TextAlign = ContentAlignment.MiddleLeft }, 0, 0);
+        var hideButton = MakeButton("收起到托盘", false);
         hideButton.Click += delegate { HideToTray(); };
-        Controls.Add(hideButton);
-
-        var footer = new Label
-        {
-            AutoSize = false,
-            Location = new Point(30, 354),
-            Size = new Size(500, 22),
-            Text = "管理员模式  ·  v1.1.0",
-            ForeColor = Color.FromArgb(125, 130, 136),
-            TextAlign = ContentAlignment.MiddleLeft
-        };
-        Controls.Add(footer);
-
-        trayIcon = new NotifyIcon
-        {
-            Icon = appIcon,
-            Text = "网络图标伪装控制器",
-            Visible = true,
-            ContextMenuStrip = BuildTrayMenu()
-        };
+        footer.Controls.Add(hideButton, 1, 0);
+        layout.Controls.Add(footer, 0, 5);
+        trayIcon = new NotifyIcon { Icon = appIcon, Text = "时间戳转换器 · 默认", Visible = true, ContextMenuStrip = BuildTrayMenu() };
         trayIcon.DoubleClick += delegate { ShowMainWindow(); };
-
-        Resize += delegate
+        unitBox.SelectedIndexChanged += delegate
         {
-            if (WindowState == FormWindowState.Minimized)
+            if (initializing) return;
+            dateOutput.Clear(); timestampOutput.Clear();
+            SetStatus("已切换单位，请重新转换。", false);
+        };
+        timestampInput.TextChanged += delegate { dateOutput.Clear(); };
+        dateInput.TextChanged += delegate { timestampOutput.Clear(); };
+        timestampInput.KeyDown += delegate(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.Enter) { ConvertTimestamp(); e.SuppressKeyPress = true; } };
+        dateInput.KeyDown += delegate(object sender, KeyEventArgs e) { if (e.KeyCode == Keys.Enter) { ConvertDate(); e.SuppressKeyPress = true; } };
+        Resize += delegate { if (WindowState == FormWindowState.Minimized) HideToTray(); };
+        healthTimer = new System.Windows.Forms.Timer { Interval = 1500 };
+        healthTimer.Tick += delegate
+        {
+            if (applying) return;
+            string error = nativeIcon.CheckHealth();
+            if (!string.IsNullOrEmpty(error))
             {
-                HideToTray();
+                SetStatus(error, true);
+                nativeOwnsStatus = true;
+            }
+            else if (nativeOwnsStatus)
+            {
+                SetStatus("地区显示已恢复 · " + TimestampConverter.GetRegionName(region), false);
             }
         };
+        healthTimer.Start();
+        UpdateRegionAppearance();
+        FillCurrentTime();
+        initializing = false;
+    }
 
-        Shown += delegate { RefreshStatus(); };
+    private static TextBox MakeTextBox(bool readOnly, string name)
+    {
+        return new TextBox { Dock = DockStyle.Fill, ReadOnly = readOnly, AccessibleName = name, Font = new Font("Consolas", 11F), BorderStyle = BorderStyle.FixedSingle, BackColor = readOnly ? Color.FromArgb(244, 247, 251) : Color.White, ForeColor = Ink, Margin = new Padding(0, 3, 8, 3) };
+    }
+
+    private static Button MakeButton(string text, bool primary)
+    {
+        var button = new Button { Text = text, Dock = DockStyle.Fill, FlatStyle = FlatStyle.Flat, BackColor = primary ? Accent : Color.White, ForeColor = primary ? Color.White : Ink, Cursor = Cursors.Hand, Margin = Padding.Empty, UseVisualStyleBackColor = false };
+        button.FlatAppearance.BorderColor = primary ? Accent : Color.FromArgb(211, 220, 230);
+        return button;
+    }
+
+    private Control MakeConversionCard(string title, TextBox input, TextBox output, Control accessory, Action convert)
+    {
+        var card = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Color.White, Padding = new Padding(14, 9, 14, 9), Margin = new Padding(0, 0, 0, 12), ColumnCount = 3, RowCount = 3 };
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 82));
+        card.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
+        card.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        card.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        var caption = new Label { Text = title, AutoSize = true, Font = new Font(Font, FontStyle.Bold), ForeColor = Ink };
+        card.Controls.Add(caption, 0, 0); card.SetColumnSpan(caption, 3);
+        card.Controls.Add(input, 0, 1);
+        accessory.Margin = new Padding(0, 3, 8, 3);
+        card.Controls.Add(accessory, 1, 1);
+        var convertButton = MakeButton("转换", true);
+        convertButton.Margin = new Padding(0, 3, 0, 3);
+        convertButton.Click += delegate { convert(); };
+        card.Controls.Add(convertButton, 2, 1);
+        card.Controls.Add(output, 0, 2); card.SetColumnSpan(output, 2);
+        var copyButton = MakeButton("复制", false);
+        copyButton.Margin = new Padding(0, 3, 0, 3);
+        copyButton.Click += delegate
+        {
+            if (string.IsNullOrEmpty(output.Text)) { SetStatus("请先转换，再复制结果。", true); return; }
+            try { Clipboard.SetText(output.Text); SetStatus("结果已复制。", false); }
+            catch (ExternalException) { SetStatus("剪贴板正被占用，请重试。", true); }
+        };
+        card.Controls.Add(copyButton, 2, 2);
+        return card;
+    }
+
+    private bool Milliseconds { get { return unitBox.SelectedIndex == 1; } }
+
+    private void ConvertTimestamp()
+    {
+        try
+        {
+            DateTimeOffset result = TimestampConverter.FromTimestamp(timestampInput.Text, Milliseconds, region);
+            dateOutput.Text = result.ToString(Milliseconds ? "yyyy-MM-dd HH:mm:ss.fff zzz" : "yyyy-MM-dd HH:mm:ss zzz", CultureInfo.InvariantCulture);
+            SetStatus("转换完成 · " + TimestampConverter.GetTimeZoneDescription(region), false);
+        }
+        catch (Exception ex) { dateOutput.Clear(); SetStatus(ex.Message, true); }
+    }
+
+    private void ConvertDate()
+    {
+        try
+        {
+            timestampOutput.Text = TimestampConverter.ToTimestamp(dateInput.Text, Milliseconds, region).ToString(CultureInfo.InvariantCulture);
+            SetStatus("转换完成 · Unix 时间戳（" + (Milliseconds ? "毫秒" : "秒") + "）", false);
+        }
+        catch (Exception ex) { timestampOutput.Clear(); SetStatus(ex.Message, true); }
+    }
+
+    private void FillCurrentTime()
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        long ticks = now.UtcDateTime.Ticks - 621355968000000000L;
+        timestampInput.Text = (ticks / (Milliseconds ? TimeSpan.TicksPerMillisecond : TimeSpan.TicksPerSecond)).ToString(CultureInfo.InvariantCulture);
+        dateInput.Text = TimeZoneInfo.ConvertTime(now, TimestampConverter.GetTimeZone(region)).ToString(Milliseconds ? "yyyy-MM-dd HH:mm:ss.fff" : "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+    }
+
+    private void SelectRegion(ConversionRegion value)
+    {
+        if (applying) return;
+        applying = true; UseWaitCursor = true;
+        foreach (Button button in regionButtons) button.Enabled = false;
+        foreach (ToolStripMenuItem item in regionMenuItems) item.Enabled = false;
+        SetStatus("正在应用地区设置…", false);
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            string error;
+            bool success = nativeIcon.TryApply(value, out error);
+            try
+            {
+                BeginInvoke((Action)delegate
+                {
+                    applying = false; UseWaitCursor = false;
+                    foreach (Button button in regionButtons) button.Enabled = true;
+                    foreach (ToolStripMenuItem item in regionMenuItems) item.Enabled = true;
+                    region = success ? value : ConversionRegion.Default;
+                    UpdateRegionAppearance();
+                    dateOutput.Clear(); timestampOutput.Clear();
+                    if (success) SetStatus("已选择" + TimestampConverter.GetRegionName(region) + "。输入内容保留，请重新转换。", false);
+                    else { SetStatus(error, true); ShowMainWindow(); }
+                });
+            }
+            catch (InvalidOperationException) { /* Form already closed during session shutdown. */ }
+        });
+    }
+
+    private void UpdateRegionAppearance()
+    {
+        for (int i = 0; i < regionButtons.Length; i++)
+        {
+            bool selected = i == (int)region;
+            regionButtons[i].BackColor = selected ? Accent : Color.White;
+            regionButtons[i].ForeColor = selected ? Color.White : Ink;
+            regionButtons[i].AccessibleDescription = selected ? "已选择" : "未选择";
+            if (regionMenuItems[i] != null) regionMenuItems[i].Checked = selected;
+        }
+        zoneLabel.Text = TimestampConverter.GetTimeZoneDescription(region);
+        if (trayIcon != null) trayIcon.Text = "时间戳转换器 · " + TimestampConverter.GetRegionName(region);
+    }
+
+    private void SetStatus(string message, bool error)
+    {
+        nativeOwnsStatus = false;
+        statusIsError = error;
+        statusLabel.Text = message;
+        statusLabel.ForeColor = error ? Color.FromArgb(171, 50, 50) : Muted;
+    }
+
+    private ContextMenuStrip BuildTrayMenu()
+    {
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("打开时间戳转换器", null, delegate { ShowMainWindow(); });
+        menu.Items.Add(new ToolStripSeparator());
+        for (int i = 0; i < 4; i++)
+        {
+            int index = i;
+            var item = new ToolStripMenuItem(TimestampConverter.GetRegionName((ConversionRegion)i));
+            item.Click += delegate { SelectRegion((ConversionRegion)index); if (statusIsError) ShowMainWindow(); };
+            regionMenuItems[i] = item; menu.Items.Add(item);
+        }
+        menu.Items.Add(new ToolStripSeparator());
+        // Exit must remain available even if Explorer's diagnostics attach hangs.
+        menu.Items.Add("退出", null, delegate { allowExit = true; Close(); });
+        return menu;
     }
 
     protected override void WndProc(ref Message m)
     {
-        if (m.Msg == ControllerApp.ShowWindowMessage)
-        {
-            ShowMainWindow();
-        }
+        if (m.Msg == ControllerApp.ShowWindowMessage) ShowMainWindow();
         base.WndProc(ref m);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        if (!allowExit && e.CloseReason == CloseReason.UserClosing)
-        {
-            e.Cancel = true;
-            HideToTray();
-            return;
-        }
-
-        trayIcon.Visible = false;
-        trayIcon.Dispose();
+        if (!allowExit && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; HideToTray(); return; }
+        nativeIcon.Dispose(); trayIcon.Visible = false;
         base.OnFormClosing(e);
     }
 
@@ -922,329 +289,48 @@ internal sealed class ControllerForm : Form
     {
         if (disposing)
         {
-            if (trayIcon != null)
-            {
-                trayIcon.Dispose();
-            }
-            if (appIcon != null)
-            {
-                appIcon.Dispose();
-            }
+            if (healthTimer != null) healthTimer.Dispose();
+            nativeIcon.Dispose();
+            if (trayIcon != null) { if (trayIcon.ContextMenuStrip != null) trayIcon.ContextMenuStrip.Dispose(); trayIcon.Dispose(); }
+            if (appIcon != null) appIcon.Dispose();
         }
         base.Dispose(disposing);
     }
 
-    private static Button CreateActionButton(string text, Point location, Color backColor, Color foreColor)
-    {
-        var button = new Button
-        {
-            Location = location,
-            Size = new Size(150, 46),
-            Text = text,
-            FlatStyle = FlatStyle.Flat,
-            BackColor = backColor,
-            ForeColor = foreColor,
-            Cursor = Cursors.Hand,
-            Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold, GraphicsUnit.Point)
-        };
-        button.FlatAppearance.BorderSize = 0;
-        return button;
-    }
-
-    private ContextMenuStrip BuildTrayMenu()
-    {
-        var menu = new ContextMenuStrip();
-        var title = new ToolStripMenuItem("网络图标伪装控制器") { Enabled = false };
-        menu.Items.Add(title);
-        menu.Items.Add(new ToolStripSeparator());
-
-        var show = new ToolStripMenuItem("打开控制器");
-        show.Click += delegate { ShowMainWindow(); };
-        menu.Items.Add(show);
-
-        var enable = new ToolStripMenuItem("开启伪装");
-        enable.Click += delegate { RunEnable(); };
-        menu.Items.Add(enable);
-
-        var disable = new ToolStripMenuItem("关闭伪装");
-        disable.Click += delegate { RunDisable(false); };
-        menu.Items.Add(disable);
-
-        var refresh = new ToolStripMenuItem("刷新状态");
-        refresh.Click += delegate { ShowMainWindow(); RefreshStatus(); };
-        menu.Items.Add(refresh);
-
-        menu.Items.Add(new ToolStripSeparator());
-
-        var disableAndExit = new ToolStripMenuItem("关闭伪装并退出");
-        disableAndExit.Click += delegate { RunDisable(true); };
-        menu.Items.Add(disableAndExit);
-
-        var exit = new ToolStripMenuItem("退出控制器（保留当前状态）");
-        exit.Click += delegate { ExitKeepingState(); };
-        menu.Items.Add(exit);
-        return menu;
-    }
-
-    private void RunEnable()
-    {
-        RunOperation(
-            "正在开启伪装，请稍候...",
-            SystemChanges.EnableSpoof,
-            "伪装已开启。Windows 通常会在 5-30 秒内显示地球图标。",
-            false);
-    }
-
-    private void RunDisable(bool exitAfter)
-    {
-        RunOperation(
-            "正在关闭伪装，请稍候...",
-            SystemChanges.DisableSpoof,
-            "伪装已关闭。Windows 通常会在 5-30 秒内恢复正常网络图标。",
-            exitAfter);
-    }
-
-    private void RunOperation(string progressText, Action action, string successText, bool exitAfter)
-    {
-        if (busy)
-        {
-            return;
-        }
-
-        ShowMainWindow();
-        SetBusy(true, progressText);
-        ThreadPool.QueueUserWorkItem(delegate
-        {
-            Exception error = null;
-            try
-            {
-                action();
-            }
-            catch (Exception ex)
-            {
-                error = ex;
-            }
-
-            try
-            {
-                BeginInvoke((Action)delegate
-                {
-                    SetBusy(false, string.Empty);
-                    RefreshStatus();
-
-                    if (error != null)
-                    {
-                        MessageBox.Show(
-                            this,
-                            "操作失败：\n" + error.Message + "\n\n日志：" + SystemChanges.LogPath,
-                            "网络图标伪装控制器",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Error);
-                        return;
-                    }
-
-                    if (exitAfter)
-                    {
-                        allowExit = true;
-                        Close();
-                        return;
-                    }
-
-                    MessageBox.Show(
-                        this,
-                        successText,
-                        "网络图标伪装控制器",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Information);
-                });
-            }
-            catch
-            {
-            }
-        });
-    }
-
-    private void RefreshStatus()
-    {
-        SpoofState state = SystemChanges.DetectState();
-        if (state == SpoofState.Enabled)
-        {
-            stateIndicator.BackColor = Color.FromArgb(23, 122, 82);
-            stateLabel.Text = "伪装已开启";
-            detailLabel.Text = "系统配置完整，当前设置会在控制器退出后继续保留。";
-            trayIcon.Text = "网络图标伪装：已开启";
-        }
-        else if (state == SpoofState.Disabled)
-        {
-            stateIndicator.BackColor = Color.FromArgb(105, 112, 120);
-            stateLabel.Text = "伪装已关闭";
-            detailLabel.Text = "Windows 使用正常的联网状态检测。";
-            trayIcon.Text = "网络图标伪装：已关闭";
-        }
-        else
-        {
-            stateIndicator.BackColor = Color.FromArgb(202, 132, 28);
-            stateLabel.Text = "检测到不完整配置";
-            detailLabel.Text = "请点击“开启伪装”重新应用，或点击“关闭伪装”完整恢复。";
-            trayIcon.Text = "网络图标伪装：配置不完整";
-        }
-
-        networkLabel.Text = "Windows 网络判断：正在读取...";
-        ThreadPool.QueueUserWorkItem(delegate
-        {
-            string summary = SystemChanges.GetConnectivitySummary();
-            try
-            {
-                BeginInvoke((Action)delegate { networkLabel.Text = summary; });
-            }
-            catch
-            {
-            }
-        });
-    }
-
-    private void SetBusy(bool value, string text)
-    {
-        busy = value;
-        enableButton.Enabled = !value;
-        disableButton.Enabled = !value;
-        refreshButton.Enabled = !value;
-        hideButton.Enabled = !value;
-        UseWaitCursor = value;
-        operationLabel.Text = value
-            ? text
-            : "关闭窗口时程序会隐藏到托盘；伪装状态只由上方按钮改变。";
-    }
-
     private void HideToTray()
     {
-        if (busy)
-        {
-            return;
-        }
-        Hide();
-        ShowInTaskbar = false;
-        if (!balloonShown)
-        {
-            trayIcon.BalloonTipTitle = "网络图标伪装控制器";
-            trayIcon.BalloonTipText = "控制器仍在运行。双击托盘图标可重新打开。";
-            trayIcon.BalloonTipIcon = ToolTipIcon.Info;
-            trayIcon.ShowBalloonTip(4000);
-            balloonShown = true;
-        }
+        Hide(); ShowInTaskbar = false;
+        if (!balloonShown) { trayIcon.ShowBalloonTip(2000, "时间戳转换器", "双击时钟图标可重新打开窗口。", ToolTipIcon.Info); balloonShown = true; }
     }
 
     private void ShowMainWindow()
     {
-        ShowInTaskbar = true;
-        Show();
-        if (WindowState == FormWindowState.Minimized)
-        {
-            WindowState = FormWindowState.Normal;
-        }
-        Activate();
-        BringToFront();
-    }
-
-    private void ExitKeepingState()
-    {
-        if (busy)
-        {
-            return;
-        }
-        allowExit = true;
-        Close();
-    }
-
-    private static Icon LoadApplicationIcon()
-    {
-        Icon extracted = null;
-        try
-        {
-            extracted = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-            if (extracted != null)
-            {
-                return (Icon)extracted.Clone();
-            }
-        }
-        finally
-        {
-            if (extracted != null)
-            {
-                extracted.Dispose();
-            }
-        }
-
-        return (Icon)SystemIcons.Application.Clone();
+        ShowInTaskbar = true; Show(); WindowState = FormWindowState.Normal; Activate();
     }
 }
 
 internal static class NativeMethods
 {
-    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    internal static extern IntPtr SendMessageTimeout(
-        IntPtr hWnd,
-        int message,
-        IntPtr wParam,
-        string lParam,
-        int flags,
-        int timeout,
-        out IntPtr result);
-
-    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     internal static extern int RegisterWindowMessage(string messageName);
-
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern bool PostMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
 }
 
 internal static class ControllerApp
 {
-    private const string MutexName = @"Global\NetworkIconSpoofController_v1";
-    private const string ShowMessageName = "NetworkIconSpoofController_ShowWindow_v1";
-    private static readonly IntPtr BroadcastWindow = new IntPtr(0xffff);
-
-    public static readonly int ShowWindowMessage = NativeMethods.RegisterWindowMessage(ShowMessageName);
-
+    public static readonly int ShowWindowMessage = NativeMethods.RegisterWindowMessage("TimestampConverter_ShowWindow_v3");
     [STAThread]
     public static void Main()
     {
-        if (!IsAdministrator())
-        {
-            MessageBox.Show(
-                "此程序需要管理员权限。请在 UAC 提示中选择“是”。",
-                "网络图标伪装控制器",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
-            return;
-        }
-
         bool createdNew;
-        using (var mutex = new Mutex(true, MutexName, out createdNew))
+        using (var mutex = new Mutex(true, @"Local\TimestampConverter_v3", out createdNew))
         {
-            if (!createdNew)
-            {
-                NativeMethods.PostMessage(BroadcastWindow, ShowWindowMessage, IntPtr.Zero, IntPtr.Zero);
-                return;
-            }
-
+            if (!createdNew) { NativeMethods.PostMessage(new IntPtr(0xffff), ShowWindowMessage, IntPtr.Zero, IntPtr.Zero); return; }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new ControllerForm());
             GC.KeepAlive(mutex);
-        }
-    }
-
-    private static bool IsAdministrator()
-    {
-        try
-        {
-            var principal = new WindowsPrincipal(WindowsIdentity.GetCurrent());
-            return principal.IsInRole(WindowsBuiltInRole.Administrator);
-        }
-        catch
-        {
-            return false;
         }
     }
 }

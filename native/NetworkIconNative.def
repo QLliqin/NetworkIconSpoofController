@@ -1,0 +1,5 @@
+LIBRARY NetworkIconNative
+EXPORTS
+    DllGetClassObject
+    DllCanUnloadNow
+    NativeAttach

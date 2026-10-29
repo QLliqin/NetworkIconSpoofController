@@ -11,23 +11,36 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Install pinned LLVM-MinGW build toolchain
+        shell: pwsh
+        run: |
+          $release = '20261020'
+          $package = "llvm-mingw-$release-ucrt-x86_64"
+          New-Item -ItemType Directory -Path obj/toolchain -Force | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/mstorsjo/llvm-mingw/releases/download/$release/$package.zip" -OutFile obj/llvm-mingw.zip
+          $expectedHash = 'FD5462B7F5D93B2FF981FCD3F9C7E427E47F3203C64EA91C27BCC444EEBD74CD'
+          if ((Get-FileHash -LiteralPath obj/llvm-mingw.zip -Algorithm SHA256).Hash -ne $expectedHash) {
+            throw 'LLVM-MinGW archive checksum mismatch.'
+          }
+          Expand-Archive -LiteralPath obj/llvm-mingw.zip -DestinationPath obj/toolchain -Force
+
       - name: Build release executable
         shell: pwsh
         run: ./build.ps1 -Clean
 
-      - name: Verify release executable
+      - name: Verify release executable and timestamp conversions
         shell: pwsh
         run: ./verify.ps1
 
       - name: Upload Windows executable
         uses: actions/upload-artifact@v4
         with:
-          name: NetworkIconSpoofController-win
-          path: dist/NetworkIconSpoofController.exe
+          name: TimestampConverter-win11-x64
+          path: dist/TimestampConverter.exe
           if-no-files-found: error

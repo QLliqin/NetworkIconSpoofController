@@ -1,18 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
-  <title id="title">Network Icon Spoof Controller</title>
-  <desc id="desc">A green globe and an amber power control on a charcoal rounded square.</desc>
+  <title id="title">Timestamp Converter</title>
+  <desc id="desc">A white clock with cyan accents on a rounded navy tile.</desc>
 
-  <rect x="28" y="28" width="456" height="456" rx="108" fill="#24282d"/>
-
-  <circle cx="238" cy="232" r="142" fill="#18a477"/>
-  <circle cx="238" cy="232" r="142" fill="none" stroke="#f7faf9" stroke-width="24"/>
-  <ellipse cx="238" cy="232" rx="68" ry="142" fill="none" stroke="#f7faf9" stroke-width="22"/>
-  <ellipse cx="238" cy="232" rx="142" ry="64" fill="none" stroke="#f7faf9" stroke-width="22"/>
-  <path d="M96 232h284" fill="none" stroke="#f7faf9" stroke-width="22" stroke-linecap="round"/>
-
-  <circle cx="382" cy="374" r="78" fill="#24282d"/>
-  <circle cx="382" cy="374" r="62" fill="#f4b942"/>
-  <path d="M382 332v48" fill="none" stroke="#24282d" stroke-width="18" stroke-linecap="round"/>
-  <path d="M353 348a42 42 0 1 0 58 0" fill="none" stroke="#24282d" stroke-width="18" stroke-linecap="round"/>
+  <rect x="24" y="24" width="464" height="464" rx="104" fill="#142b4a"/>
+  <circle cx="256" cy="256" r="144" fill="none" stroke="#f7fbff" stroke-width="30"/>
+  <path d="M256 164v92l62 36" fill="none" stroke="#f7fbff" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M256 106v18" fill="none" stroke="#4ed8ec" stroke-width="30" stroke-linecap="round"/>
+  <circle cx="256" cy="256" r="17" fill="#4ed8ec"/>
 </svg>

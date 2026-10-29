@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Generate the project PNG and multi-resolution Windows ICO assets."""
+"""Generate the timestamp converter PNG and multi-resolution Windows ICO.
+
+The geometry and palette match assets/app-icon.svg. Render at four times the
+source resolution before downsampling so even the small tray frames stay clear.
+"""
 
 from pathlib import Path
 
@@ -20,71 +24,33 @@ def s(value: int) -> int:
     return value * SCALE
 
 
+def round_line(draw: ImageDraw.ImageDraw, points, fill: str, width: int) -> None:
+    scaled = [(s(x), s(y)) for x, y in points]
+    draw.line(scaled, fill=fill, width=s(width), joint="curve")
+    radius = s(width) // 2
+    for x, y in scaled:
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=fill)
+
+
 def make_icon() -> Image.Image:
     image = Image.new("RGBA", (s(CANVAS), s(CANVAS)), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
-    charcoal = "#24282d"
-    green = "#18a477"
-    white = "#f7faf9"
-    amber = "#f4b942"
+    navy = "#142b4a"
+    white = "#f7fbff"
+    cyan = "#4ed8ec"
 
-    draw.rounded_rectangle(
-        (s(28), s(28), s(484), s(484)),
-        radius=s(108),
-        fill=charcoal,
-    )
+    draw.rounded_rectangle((s(24), s(24), s(488), s(488)), radius=s(104), fill=navy)
 
-    cx, cy, radius = s(238), s(232), s(142)
-    globe_box = (cx - radius, cy - radius, cx + radius, cy + radius)
-    draw.ellipse(globe_box, fill=green, outline=white, width=s(24))
-    draw.ellipse(
-        (cx - s(68), cy - radius, cx + s(68), cy + radius),
-        outline=white,
-        width=s(22),
-    )
-    draw.ellipse(
-        (cx - radius, cy - s(64), cx + radius, cy + s(64)),
-        outline=white,
-        width=s(22),
-    )
-    draw.line(
-        (s(96), cy, s(380), cy),
-        fill=white,
-        width=s(22),
-    )
+    # A 30-unit ring, centered on r=144, matching the SVG stroke.
+    draw.ellipse((s(97), s(97), s(415), s(415)), fill=white)
+    draw.ellipse((s(127), s(127), s(385), s(385)), fill=navy)
 
-    power_cx, power_cy = s(382), s(374)
-    draw.ellipse(
-        (
-            power_cx - s(78),
-            power_cy - s(78),
-            power_cx + s(78),
-            power_cy + s(78),
-        ),
-        fill=charcoal,
-    )
-    draw.ellipse(
-        (
-            power_cx - s(62),
-            power_cy - s(62),
-            power_cx + s(62),
-            power_cy + s(62),
-        ),
-        fill=amber,
-    )
-    draw.line(
-        (power_cx, s(332), power_cx, s(380)),
-        fill=charcoal,
-        width=s(18),
-    )
-    draw.arc(
-        (s(340), s(338), s(424), s(422)),
-        start=310,
-        end=230,
-        fill=charcoal,
-        width=s(18),
-    )
+    round_line(draw, [(256, 164), (256, 256), (318, 292)], white, 30)
+
+    # A small accent at twelve o'clock keeps the image distinct from a stock clock.
+    round_line(draw, [(256, 106), (256, 124)], cyan, 30)
+    draw.ellipse((s(239), s(239), s(273), s(273)), fill=cyan)
 
     return image.resize((CANVAS, CANVAS), Image.Resampling.LANCZOS)
 

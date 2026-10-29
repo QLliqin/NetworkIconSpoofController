@@ -12,5 +12,5 @@ if errorlevel 1 (
 )
 
 echo.
-echo Build completed: dist\NetworkIconSpoofController.exe
+echo Build completed: dist\TimestampConverter.exe
 pause

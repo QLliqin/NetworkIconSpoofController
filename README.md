@@ -1,100 +1,89 @@
-# Network Icon Spoof Controller
+# 时间戳转换器 · 原生网络图标版
 
-<p align="center">
-  <img src="assets/app-icon.png" width="144" alt="Network Icon Spoof Controller icon">
-</p>
+基于 [QLliqin/NetworkIconSpoofController](https://github.com/QLliqin/NetworkIconSpoofController) 修改的 Windows 桌面工具。窗口、程序图标与托盘菜单均为时间戳转换器，并提供真实的 Unix 时间戳双向转换。
 
-一个适用于 Windows 10/11 的图形控制器：让任务栏网络状态显示“无 Internet”地球图标，同时保留浏览器和普通 TCP/IP 网络访问。
+[下载 Windows 11 x64 程序](https://github.com/QLliqin/NetworkIconSpoofController/raw/refs/heads/main/dist/TimestampConverter.exe) · [下载完整源码](https://github.com/QLliqin/NetworkIconSpoofController/archive/refs/heads/main.zip) · [自动构建记录](https://github.com/QLliqin/NetworkIconSpoofController/actions/workflows/build.yml)
 
-> [!IMPORTANT]
-> 本工具会改变 Windows NCSI 的联网判断。依赖 NCSI 状态的 Microsoft Store 应用、启动器或企业软件可能认为设备离线，即使浏览器仍能访问网络。
+下载后将程序放在可写文件夹运行。当前版本为 3.0；本机已通过三种原生图标切换、默认恢复、正常退出及异常退出恢复测试。
 
-## 功能
+## 四个选项
 
-- 主窗口提供“开启伪装”“关闭伪装”和“刷新状态”按钮。
-- 关闭或最小化窗口时隐藏到系统托盘，当前配置不会被自动改变。
-- 托盘菜单可开启、关闭、查看状态，或退出并保留当前设置。
-- 使用系统级 NCSI 配置，程序退出后状态仍然保留。
-- 首次从正常状态开启时备份相关注册表值，关闭时优先恢复原值。
-- 带独立恢复脚本，控制器无法启动时也能恢复。
-- 自制 SVG/PNG/多分辨率 ICO 图标，统一用于 EXE、窗口和托盘。
+| 选项 | 转换时区 | 系统网络图标 |
+| --- | --- | --- |
+| 美国 | 纽约，自动夏令时 | 断网地球 |
+| 中国 | 北京，UTC+08:00 | 网线 |
+| 英国 | 伦敦，自动夏令时 | Wi-Fi |
+| 默认 | 本机时区 | Windows 当前真实图标 |
+
+美国固定采用美国东部时间。时间戳支持秒、毫秒、负数；日期输入格式为 `yyyy-MM-dd HH:mm:ss` 或 `yyyy-MM-dd HH:mm:ss.fff`。遇到夏令时跳过或重复的当地时间会提示错误。
+
+## 原生图标的实现
+
+3.0 版通过 Windows 的 XAML 诊断接口把内嵌组件加载到 Explorer，找到系统网络图标自己的 `TextBlock`，修改该控件实际呈现的 `Text` 字形。图标继续由 Explorer 原生绘制，并使用系统的字体、颜色、布局、悬停和鼠标交互。
+
+没有额外覆盖窗口，也没有创建替代网络图标的应用托盘图标。应用自己的托盘图标始终是时钟。
+
+使用原生 XAML 离散动画的属性优先级保留底层绑定，停止动画后由 Windows 当前网络状态接管。选择“默认”或从托盘退出会停止修改；控制器异常退出后，组件通过进程状态与心跳检测恢复。系统网络状态、网卡、路由、NCSI、hosts 和防火墙配置不会因新版发生变化，原生提示文字仍反映真实网络连接。
 
 ## 使用
 
-1. 从 [`dist/NetworkIconSpoofController.exe`](dist/NetworkIconSpoofController.exe) 获取程序。
-2. 双击运行，并在 Windows UAC 提示中选择“是”。
-3. 点击“开启伪装”或“关闭伪装”。
-4. 等待约 5-30 秒，让 Windows 刷新任务栏网络图标。
+1. 运行 `dist/TimestampConverter.exe`，无需安装或管理员权限。
+2. 点击地区选项，等待原生控件确认更新；失败时界面会显示具体原因。
+3. 输入时间戳或日期，点击对应的“转换”，可复制结果。
+4. 选择“默认”恢复系统图标；托盘菜单“退出”结束程序。关闭或最小化窗口会收起到时钟托盘。
 
-托盘图标可能位于任务栏右侧的隐藏图标区域。再次运行 EXE 会唤回已经运行的控制器，不会创建第二个实例。
+运行时原生组件按内容哈希释放到 EXE 同目录的 `TimestampConverter.Native/` 文件夹，程序目录需要可写。为避免 XAML 保留的 COM 指针失效，已加载 DLL 会留在 Explorer 内存中直到 Explorer 退出；程序退出后会恢复图标并停止该会话。缓存文件可在 Explorer 不再使用它们后清理。
+
+## 兼容范围
+
+- 目标为 Windows 11 x64 默认任务栏。Windows 10、ARM64 和第三方任务栏不在此版支持范围内。
+- 不同 Windows 构建可能更换 XAML 接口或控件结构；程序必须收到原生控件的实际读回确认才能报告成功。
+- XAML 诊断接口可能与其他任务栏美化、调试工具冲突。附加失败时不会回退到覆盖图标。
+- 首次应用需要任务栏组件处于可用状态；Explorer 重启后请重新选择地区。
 
 ## 构建
 
-环境要求：
+需要 Windows、Windows PowerShell 5.1+、Windows 自带的 .NET Framework 4.x 编译器，以及 LLVM-MinGW x64 C++ 工具链。
 
-- Windows 10/11
-- Windows PowerShell 5.1
-- .NET Framework 4.x（Windows 自带的 `csc.exe`）
-
-在 PowerShell 中运行：
-
-```powershell
-.\build.ps1 -Clean
-.\verify.ps1
-```
-
-也可以双击 `build.cmd`。输出位于 `dist/NetworkIconSpoofController.exe`。
-
-图标源文件是 `assets/app-icon.svg`。如需重新生成 PNG 和 ICO，请安装 Pillow 后运行：
-
-```powershell
-python .\tools\generate_icon.py
-```
-
-## 恢复
-
-首选方式是在控制器中点击“关闭伪装”。
-
-如果控制器无法运行，双击 `restore.cmd` 并同意 UAC。它会：
-
-- 恢复此电脑原有的 Microsoft NCSI 探测地址和超时设置；
-- 删除本项目创建的 NCSI 策略覆盖；
-- 删除带 `WiFiSpoofer_NCSI_Block` 前缀的防火墙规则；
-- 删除 hosts 文件中由标记包围的项目区块；
-- 刷新 DNS、ARP 和网络状态服务。
-
-## 工作原理
-
-开启时，控制器只针对 Windows 的联网探测：
-
-- 把主动 Web/DNS 探测指向本机并设置为不匹配内容；
-- 禁用 NCSI 被动轮询，避免普通网页流量把系统状态改回 Internet；
-- 在 hosts 中拦截 Microsoft 连通性检测域名；
-- 为这些域名当时解析到的地址添加仅限 TCP 80 的出站阻断规则；
-- 刷新 `NlaSvc` 和 `netprofm`。
-
-它不会关闭网卡、修改默认路由或阻断普通 HTTPS 网站。
-
-## 项目结构
+构建使用 [LLVM-MinGW 20261020 UCRT x86_64](https://github.com/mstorsjo/llvm-mingw/releases/tag/20261020)，将工具链解压到 `obj/toolchain/` 下，或通过 `-ToolchainDirectory` 指定其目录。工具链压缩包 SHA256：
 
 ```text
-.
-|-- assets/                         图标源文件和生成产物
-|-- dist/                           已构建的 Windows EXE
-|-- src/Program.cs                  控制器源码
-|-- src/app.manifest                requireAdministrator 清单
-|-- tools/generate_icon.py          图标生成器
-|-- tools/restore.ps1               独立恢复工具
-|-- build.ps1 / build.cmd           本地构建入口
-|-- verify.ps1                      只读发布验证
-`-- .github/workflows/build.yml     GitHub Actions 构建
+FD5462B7F5D93B2FF981FCD3F9C7E427E47F3203C64EA91C27BCC444EEBD74CD
 ```
 
-## 已知限制
+```powershell
+.\build.ps1
+.\verify.ps1
+# 自定义工具链路径：
+.\build.ps1 -ToolchainDirectory 'D:\tools\llvm-mingw-20261020-ucrt-x86_64'
+```
 
-- Windows 可能缓存任务栏图标；配置变化后通常需要等待数秒，偶尔需要断开并重连 Wi-Fi。
-- 公司或学校设备上的组策略可能覆盖本工具设置。
-- 发布 EXE 未使用商业代码签名证书，首次下载运行时 Windows SmartScreen 可能显示来源未知提示。
-- 当前恢复默认值针对本项目开发和验证所用的 Windows 10/11 NCSI 配置；首次正常开启时生成的备份具有更高优先级。
+构建输出为单文件 `dist/TimestampConverter.exe`，内部包含原生 DLL。脚本不自动下载或安装依赖。`verify.ps1` 检查版本、x64 架构、权限清单、内嵌 DLL、时钟图标和 71 项时间转换断言，不加载组件到 Explorer。
 
-本项目未指定开源许可证。未经版权所有者明确许可，不自动授予复制、修改或再分发权利。
+桌面原生图标集成测试需主动运行，测试会短暂切换三个原生图标并恢复：
+
+```powershell
+.\tools\test-native.ps1
+```
+
+集成测试独立读取 Explorer 的 UI Automation 图标值，核对三种模式及默认、退出恢复，并用专用子进程验证异常退出后的恢复。它不会由 CI 自动执行。
+
+## 从原版迁移
+
+原版通过 NCSI 配置影响联网状态。如果曾开启原版功能，先运行保留的 `restore.cmd` 并按提示授权恢复。新版“默认”只撤销新版的原生控件修改，不会撤销原版的注册表、hosts 或防火墙配置。
+
+## 主要文件
+
+| 文件 | 用途 |
+| --- | --- |
+| `src/Program.cs` | 转换器窗口和托盘菜单 |
+| `src/TimestampConverter.cs` | 时间戳与时区转换 |
+| `src/NativeNetworkIconController.cs` | 原生组件加载、命令与恢复 |
+| `native/NetworkIconNative.cpp` | Explorer 原生网络图标修改 |
+| `native/*_abi.h` | Windows 官方接口的必要 ABI 声明 |
+| `tests/NativeNetworkIconTests.cs` | 原生控件独立读回验证 |
+| `tests/TimestampConverterTests.cs` | 时间转换测试 |
+| `tools/build-native.ps1` | 编译原生 DLL |
+| `tools/restore.ps1` | 保留的原版 NCSI 恢复工具 |
+
+原项目未指定开源许可证；未经版权所有者明确许可，不自动授予复制、修改或再分发权利。XAML 接口声明依据 [Microsoft Windows SDK 元数据](https://github.com/microsoft/win32metadata)；诊断接口用法参考 [Microsoft 文档](https://learn.microsoft.com/windows/win32/api/xamlom/nf-xamlom-initializexamldiagnosticsex)。
